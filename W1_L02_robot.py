@@ -66,8 +66,9 @@ def main():
     msg_id = robot_response.get("msgID")
 
     print("Robot question:", question_text)
-
+    
     answer = construct_answer(question_text, msg_id)
+    print(answer)
     if answer:
         send_answer(answer)
 
