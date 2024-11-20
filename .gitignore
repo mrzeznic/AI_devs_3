@@ -3,3 +3,5 @@ secrets.json
 _archive/
 __pycache/
 __pycache__/
+recordings/
+.DS_Store
