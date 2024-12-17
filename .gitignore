@@ -5,3 +5,4 @@ __pycache/
 __pycache__/
 recordings/
 .DS_Store
+extracted_files/
