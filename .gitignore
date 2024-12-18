@@ -7,3 +7,5 @@ recordings/
 .DS_Store
 extracted_files/
 classification_cache.json
+cache/
+data/
