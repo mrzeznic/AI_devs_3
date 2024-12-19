@@ -22,6 +22,14 @@ AIDEVS_CENTRALA = "https://centrala.ag3nts.org"
 api_key = get_api_key()
 openai.api_key = get_open_api_key()
 
+def get_answer_from_cache(question):
+    # Implement your cache retrieval logic here
+    pass
+
+def save_answer_to_cache(question, answer):
+    # Implement your cache saving logic here
+    pass
+
 def download_html(url: str, cache_file: str) -> str:
     """Download and cache HTML content"""
     if os.path.exists(cache_file):
@@ -91,7 +99,7 @@ def describe_image(client: openai, image_url: str, figcaption: str, cache_dir: s
         ],
         model="gpt-4o",
         max_tokens=500,
-        temperature=0.0
+        temperature=0.5
     )
 
     # Save cached description
@@ -179,20 +187,26 @@ def answer_questions(client: openai, questions: Dict[str, str], context: str) ->
     """Generate answers for questions using context"""
     answers = {}
     
+    if CACHE_ENABLED:
+        cached_answer = get_answer_from_cache(questions)
+        if cached_answer:
+            return cached_answer
+        
     for qid, question in questions.items():
         response = openai.ChatCompletion.create(
             messages=[
                 {
                     "role": "system",
-                    "content": "Odpowiedz na pytanie w jednym krókim zdaniu na podstawie dostarczonego kontekstu."
+                    "content": "Odpowiedz na pytanie w jednym krókim zdaniu na podstawie dostarczonego kontekstu. Szukaj we wszystkich treściach. Zastanów sie chwilę zanim udzielisz opowiedzi."
                 },
                 {
                     "role": "user",
-                    "content": f"Kontekst:\n{context}\n\nPytanie: {question}"
+                    "content": f"Kontekst:\n{context[:500]}\n\nPytanie: {question[:100]}"
                 }
             ],
             model="gpt-4o",
-            temperature=0.0
+            temperature=0.0,
+            max_tokens=100
         )
         answers[qid] = response.choices[0].message.content.strip()
         print(f"Answer for {qid}={question}:\n{answers[qid]}")
@@ -202,7 +216,7 @@ def answer_questions(client: openai, questions: Dict[str, str], context: str) ->
 def send_report(answer: str) -> dict:
     final_answer = {
         "task": "arxiv",
-        "apikey": os.getenv('AIDEVS_API_KEY'),
+        "apikey": api_key,
         "answer": answer
     }
     response = requests.post(
