@@ -77,10 +77,15 @@ def generate_keywords(text: str, cache_path: Path) -> str:
         response = openai.ChatCompletion.create(
             model="gpt-4o",
             messages=[
-                {"role": "system", "content": "Jestes asystentem generujacym slowa kluczowe w formie mianownika do pomocy w kategoryzacji dokumentow tekstowych. Wszystkie slowa kluczowe powinny byc oddzielone przecinkami, unikaj dodawania nowych znacznikow nowej linii."},
+                {"role": "system", "content": """Jestes asystentem generujacym slowa kluczowe w formie mianownika do pomocy w kategoryzacji dokumentow tekstowych.
+                 Wszystkie slowa kluczowe powinny byc oddzielone przecinkami, unikaj dodawania nowych znacznikow nowej linii. 
+                 Pierwsze slowo klucz MUSI byc nazwą sektora/działu wyciągniętą z nazwy pliku w formacie na przykalad 'sektor X1', 'sektor X2' itp.. 
+                 Zwroc uwage na osoby (jeśli podane) - kim jest, czym się zajmuje (bardzo konkretnie), 
+                 gdzie mieszka oraz inne istotne szczegóły. Jezeli znajdziesz osobe wyciagnij dla niej slowa kluczowe"""},
                 {"role": "user", "content": f"Wybierz slowa kluczowe z ponizszego tekstu:\n\n{text}"}
+                
             ],
-            temperature=0.0,
+            temperature=0.3,
             max_tokens=300
         )
         keywords = response.choices[0].message["content"].strip()
