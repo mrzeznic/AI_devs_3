@@ -9,3 +9,5 @@ extracted_files/
 classification_cache.json
 cache/
 data/
+sender.py
+*._1*.

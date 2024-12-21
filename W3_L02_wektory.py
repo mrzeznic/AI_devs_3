@@ -1,188 +1,122 @@
 import os
-import zipfile  # <-- This import was missing
+import json
 import requests
-from pathlib import Path
+from qdrant_client import QdrantClient
+from qdrant_client.http.models import Distance, VectorParams
+from qdrant_client.models import PointStruct
 import openai
 from get_api_key import get_api_key
 from get_open_api_key import get_open_api_key
-from uuid import uuid4
-from qdrant_client import QdrantClient
-from qdrant_client.http.models import Distance, VectorParams, PointStruct
 
+# Configuration
 TASK_ID = "wektory"
-INPUT_DATA = "https://centrala.ag3nts.org/dane/pliki_z_fabryki.zip"
 EXTRACTION_FOLDER = "./extracted_files/W3L02"
-OUTPUT_URL = "https://centrala.ag3nts.org/report"
 CACHE_FOLDER = "./cache/W3L02"
-WEAPONS_ARCHIVE = "weapons_tests.zip"
-PASSWORD = "1670"
+API_ENDPOINT = "https://centrala.ag3nts.org/report"
+USE_CACHE = True
+EMBEDDING_MODEL = "text-embedding-ada-002"
+QDRANT_COLLECTION = "aidevs"
 
-api_key = get_api_key()
+# Set up API keys
 openai.api_key = get_open_api_key()
+os.environ['OPENAI_API_KEY'] = openai.api_key
+os.environ['CENTRALA_API_KEY'] = get_api_key()
 
-# Helper Functions
-def download_and_extract_zip(url: str, extraction_path: str, zip_file_name: str = "files.zip"):
-    """Download and extract a ZIP file only if the extraction folder does not exist."""
-    if os.path.exists(extraction_path) and os.listdir(extraction_path):
-        print(f"Extraction folder '{extraction_path}' already exists and is not empty. Skipping download and extraction.")
-        return
+# Ensure cache folder exists
+os.makedirs(CACHE_FOLDER, exist_ok=True)
 
-    try:
-        print("Downloading ZIP file...")
-        response = requests.get(url, stream=True)
-        response.raise_for_status()
-        os.makedirs(extraction_path, exist_ok=True)
-        zip_path = os.path.join(extraction_path, zip_file_name)
+# Load text files
+def load_text_files(folder_path):
+    files = {}
+    for file in os.listdir(folder_path):
+        if file.endswith('.txt'):
+            with open(os.path.join(folder_path, file), "r") as f:
+                files[file] = f.read()
+    return files
 
-        with open(zip_path, "wb") as zip_file:
-            for chunk in response.iter_content(chunk_size=8192):
-                zip_file.write(chunk)
+# Cache utility
+def get_cached_embedding(file_name):
+    cache_path = os.path.join(CACHE_FOLDER, f"{file_name}.json")
+    if USE_CACHE and os.path.exists(cache_path):
+        with open(cache_path, "r") as cache_file:
+            return json.load(cache_file)
+    return None
 
-        print("Extracting ZIP file...")
-        with zipfile.ZipFile(zip_path, "r") as zip_ref:
-            zip_ref.extractall(extraction_path)
-        print("Files extracted successfully.")
-    except requests.exceptions.RequestException as e:
-        print(f"Error downloading ZIP file: {e}")
-        raise
-    except zipfile.BadZipFile:
-        print("Error: Bad ZIP file.")
-        raise
+def save_embedding_to_cache(file_name, embedding):
+    if USE_CACHE:
+        cache_path = os.path.join(CACHE_FOLDER, f"{file_name}.json")
+        with open(cache_path, "w") as cache_file:
+            json.dump(embedding, cache_file)
 
-def extract_encrypted_zip(zip_path: str, extraction_path: str, password: str):
-    """Extract an encrypted ZIP file using a password."""
-    try:
-        with zipfile.ZipFile(zip_path, "r") as zip_ref:
-            zip_ref.extractall(extraction_path, pwd=bytes(password, "utf-8"))
-        print("Encrypted ZIP file extracted successfully.")
-    except Exception as e:
-        print(f"Error extracting encrypted ZIP file: {e}")
-        raise
+# Generate embeddings
+def generate_embeddings(files):
+    embeddings = {}
+    for file_name, content in files.items():
+        cached_embedding = get_cached_embedding(file_name)
+        if cached_embedding:
+            print(f"Using cached embedding for {file_name}")
+            embeddings[file_name] = cached_embedding
+        else:
+            print(f"Generating embedding for {file_name}")
+            embedding = openai.Embedding.create(
+                input=content,
+                model=EMBEDDING_MODEL
+            ).data[0]["embedding"]
+            save_embedding_to_cache(file_name, embedding)
+            embeddings[file_name] = embedding
+    return embeddings
 
-def generate_embeddings(text: str):
-    """Generate embeddings using OpenAI."""
-    try:
-        response = openai.Embedding.create(
-            model="text-embedding-ada-002",
-            input=text
+# Initialize Qdrant
+def initialize_qdrant(collection_name, vector_size=1536):
+    client = QdrantClient(host="localhost", port=6333)
+    if not client.collection_exists(collection_name):
+        client.create_collection(
+            collection_name=collection_name,
+            vectors_config=VectorParams(size=vector_size, distance=Distance.COSINE)
         )
-        return response["data"][0]["embedding"]
-    except Exception as e:
-        print(f"Error generating embedding: {e}")
-        raise
+    return client
 
-def index_reports_to_qdrant(report_paths: list, collection_name: str) -> None:
-    """Index the reports into Qdrant with metadata and embeddings."""
-    client = QdrantClient("localhost", port=6333)
-    
-    # Check if collection exists and recreate it
-    if client.collection_exists(collection_name):
-        print(f"Collection {collection_name} already exists, recreating...")
-    
-    # Create collection if it doesn't exist
-    client.recreate_collection(
-        collection_name=collection_name,
-        vectors_config=VectorParams(size=1536, distance=Distance.COSINE)  # Size of embedding vector
-    )
-    print(f"Collection {collection_name} created")
-    
-    # Process each report
-    points = []
-    for report_path in report_paths:
-        try:
-            with open(report_path, "r", encoding="utf-8") as file:
-                content = file.read().strip()
+# Upload embeddings to Qdrant
+def upload_embeddings_to_qdrant(client, collection_name, embeddings):
+    points = [
+        PointStruct(
+            id=idx,
+            vector=vector,
+            payload={"date": file_name.replace('.txt', '').replace('_', '-')}
+        )
+        for idx, (file_name, vector) in enumerate(embeddings.items())
+    ]
+    client.upsert(collection_name=collection_name, points=points)
 
-            # Generate embedding for the content
-            embedding = generate_embeddings(content)
-            
-            # Create point with metadata
-            points.append(PointStruct(
-                id=str(uuid4()),  # Use UUID as the point ID
-                vector=embedding,
-                payload={
-                    "file_name": report_path.name,
-                    "content": content
-                }
-            ))
-            print(f"Indexed {report_path.name}")
-        except Exception as e:
-            print(f"Error indexing file {report_path.name}: {e}")
-    
-    # Upload the indexed reports in batch
-    print(f"Uploading {len(points)} points to Qdrant...")
-    client.upsert(
-        collection_name=collection_name,
-        points=points
-    )
-    print(f"Successfully indexed {len(points)} reports")
+# Query Qdrant
+def query_qdrant(client, collection_name, query_text):
+    query_embedding = openai.Embedding.create(
+        input=query_text,
+        model=EMBEDDING_MODEL
+    ).data[0]["embedding"]
+    hits = client.search(collection_name=collection_name, query_vector=query_embedding, limit=1)
+    return hits[0].payload["date"] if hits else None
 
-def search_report_in_qdrant(query: str, collection_name: str) -> str:
-    """Search the most relevant report using query embedding."""
-    client = QdrantClient("localhost", port=6333)
-    
-    # Create query embedding
-    query_embedding = generate_embeddings(query)
-    print(f"Searching for reports with query: {query}")
-    
-    # Search for the most relevant report
-    results = client.search(
-        collection_name=collection_name,
-        query_vector=query_embedding,
-        limit=1
-    )
-    
-    if not results:
-        raise Exception("No results found")
-    
-    # Extract the date or relevant information from the metadata of the top result
-    result = results[0]
-    date = result.payload["file_name"]
-    print(f"Found relevant report: {date}")
-    return date
-
-def send_report(answer: str):
-    """Send the answer to the central API."""
-    payload = {
-        "task": TASK_ID,
-        "apikey": api_key,
-        "answer": answer
-    }
-    try:
-        response = requests.post(OUTPUT_URL, json=payload)
-        response.raise_for_status()
-        print("Report successfully sent to the central API.")
-        print("Response:", response.json())
-        return response.json()
-    except requests.exceptions.RequestException as e:
-        print(f"Error sending report: {e}")
-        raise
-
-# Main Function
+# Main execution
 def main():
-    try:
-        # Step 1: Download and extract the main ZIP file
-        if not os.path.exists(EXTRACTION_FOLDER):
-            os.makedirs(EXTRACTION_FOLDER)
-        download_and_extract_zip(INPUT_DATA, EXTRACTION_FOLDER)
+    # Load and process files
+    files = load_text_files(os.path.join(EXTRACTION_FOLDER, "weapons_tests/do-not-share"))
+    embeddings = generate_embeddings(files)
 
-        # Step 2: Extract the encrypted archive
-        encrypted_zip_path = Path(EXTRACTION_FOLDER) / WEAPONS_ARCHIVE
-        extracted_path = Path(EXTRACTION_FOLDER) / "weapons_tests"
-        extract_encrypted_zip(encrypted_zip_path, extracted_path, PASSWORD)
+    # Initialize Qdrant and upload embeddings
+    qdrant_client = initialize_qdrant(QDRANT_COLLECTION)
+    upload_embeddings_to_qdrant(qdrant_client, QDRANT_COLLECTION, embeddings)
 
-        # Step 3: Index the TXT reports in Qdrant
-        report_paths = list(extracted_path.glob("*.txt"))
-        collection_name = "weapons_reports"
-        index_reports_to_qdrant(report_paths, collection_name)
+    # Query Qdrant
+    question = "W raporcie, z którego dnia znajduje się wzmianka o kradzieży prototypu broni?"
+    result_date = query_qdrant(qdrant_client, QDRANT_COLLECTION, question)
 
-        # Step 4: Search for the relevant report
-        query = "W raporcie, z którego dnia znajduje się wzmianka o kradzieży prototypu broni?"
-        relevant_report_date = search_report_in_qdrant(query, collection_name)
-        # Step 5: Send the date to the central API
-        send_report(relevant_report_date)
-    except Exception as e:
-        print(f"An error occurred: {e}")
+    # Submit result
+    if result_date:
+        response = requests.post(API_ENDPOINT, json={"task": TASK_ID, "apikey": get_api_key(), "answer": result_date})
+        print("Response:", response.text)
+    else:
+        print("No relevant results found.")
 
 if __name__ == "__main__":
     main()
