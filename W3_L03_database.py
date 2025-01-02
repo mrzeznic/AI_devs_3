@@ -116,10 +116,6 @@ def main():
 
         # Step 5: Send result to the central API
         flag = send_result_to_central(datacenter_ids)
-        if flag:
-            print(f"Flag received: {flag}")
-        else:
-            print("No flag received.")
 
     except Exception as e:
         print("An error occurred:", str(e))
